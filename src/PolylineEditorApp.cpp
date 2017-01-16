@@ -21,14 +21,24 @@ class PolylineEditorApp : public App {
 	// Using a list so the iterators are valid after insertions and removals.
 	typedef typename list<PolyLine2f>::iterator Iterator;
 
+	bool hasSelectedFace() { return mFaceSelected != mPolyLines.end(); };
+	void deselectFace() { mFaceSelected = mPolyLines.end(); };
+	void selectFirstFace() { mFaceSelected = mPolyLines.begin(); }
+	void selectNextFace() {
+		++mFaceSelected;
+		if( ! hasSelectedFace() )
+			selectFirstFace();
+	}
+
 	bool positionOnPlane( const vec2 &mouse, vec2 &onPlane );
 	Iterator containedBy( const vec2 &onPlane );
 
 	bool isAppending();
 
 	list<PolyLine2f>	mPolyLines;
-	Iterator	mHover;
-	Iterator	mSelected;
+	Iterator	mFaceHover;		// The face the cursor is over
+	Iterator	mFaceSelected;	// The face they've selected
+	vec2		mVertexHover;	// Vertex in the selected face, only valid
     CameraPersp mEditCamera;
 	vec2		mMousePosition;
 	vec2		mCursorPosition; // Is on the plane
@@ -53,7 +63,7 @@ void PolylineEditorApp::mouseMove( MouseEvent event )
 	mMousePosition = event.getPos();
 	positionOnPlane( mMousePosition, mCursorPosition );
 	if ( !this->isAppending() ) {
-		mHover = this->containedBy( mCursorPosition );
+		mFaceHover = this->containedBy( mCursorPosition );
 	}
 }
 
@@ -62,7 +72,7 @@ void PolylineEditorApp::mouseDown( MouseEvent event )
 	if( this->isAppending() ) {
 		mPolyLines.back().push_back( mCursorPosition );
 	} else {
-		mSelected = mHover;
+		mFaceSelected = mFaceHover;
 	}
 
 	// Keel a recent value so when dragging starts the delta will be sane.
@@ -72,8 +82,8 @@ void PolylineEditorApp::mouseDown( MouseEvent event )
 void PolylineEditorApp::mouseDrag( MouseEvent event ) {
 	// Something isn't quite right here. It's dragging at half speed.
 	ivec2 delta( event.getPos() - mLastMouseDrag );
-	if( delta != ivec2( 0 ) && mSelected != mPolyLines.end() ) {
-		mSelected->offset( delta * ivec2( 1, -1 ) );
+	if( delta != ivec2( 0 ) && hasSelectedFace() ) {
+		mFaceSelected->offset( delta * ivec2( 1, -1 ) );
 	}
 	mLastMouseDrag = event.getPos();
 }
@@ -85,10 +95,15 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 		case KeyEvent::KEY_ESCAPE:
 			if( this->isAppending() )
 				mPolyLines.pop_back();
-				break;
+			else
+				deselectFace();
+			break;
 		case KeyEvent::KEY_RETURN:
 			if( mPolyLines.size() )
 				mPolyLines.back().setClosed();
+			break;
+		case KeyEvent::KEY_TAB:
+			selectNextFace();
 			break;
 		case KeyEvent::KEY_n:
 			if( this->isAppending() )
@@ -125,10 +140,10 @@ void PolylineEditorApp::draw()
 	for ( auto p = mPolyLines.begin(); p != end; ++p ) {
 		gl::ScopedColor color( ColorA( 1, 1, 1, 0.5 ) );
 		gl::drawSolid( *p );
-		if ( mSelected == p ) {
+		if ( mFaceSelected == p ) {
 			gl::ScopedColor color( selected );
 			gl::draw( *p );
-		} else if ( mHover == p ) {
+		} else if ( mFaceHover == p ) {
 			gl::ScopedColor color( hover );
 			gl::draw( *p );
 		}
