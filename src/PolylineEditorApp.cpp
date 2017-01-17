@@ -22,6 +22,7 @@ class PolylineEditorApp : public App {
 	typedef typename list<PolyLine2f>::iterator Iterator;
 
 	bool hasSelectedFace() { return mFaceSelected != mPolyLines.end(); };
+	void selectFace( Iterator &face ) { mFaceSelected = face; }
 	void deselectFace() { mFaceSelected = mPolyLines.end(); };
 	void selectFirstFace() { mFaceSelected = mPolyLines.begin(); }
 	void selectNextFace() {
@@ -62,7 +63,7 @@ void PolylineEditorApp::mouseMove( MouseEvent event )
 {
 	mMousePosition = event.getPos();
 	positionOnPlane( mMousePosition, mCursorPosition );
-	if ( !this->isAppending() ) {
+	if ( ! isAppending() ) {
 		mFaceHover = this->containedBy( mCursorPosition );
 	}
 }
@@ -72,7 +73,7 @@ void PolylineEditorApp::mouseDown( MouseEvent event )
 	if( this->isAppending() ) {
 		mPolyLines.back().push_back( mCursorPosition );
 	} else {
-		mFaceSelected = mFaceHover;
+		selectFace( mFaceHover );
 	}
 
 	// Keel a recent value so when dragging starts the delta will be sane.
@@ -93,7 +94,7 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 {
 	switch( event.getCode() ) {
 		case KeyEvent::KEY_ESCAPE:
-			if( this->isAppending() )
+			if( isAppending() )
 				mPolyLines.pop_back();
 			else
 				deselectFace();
@@ -103,10 +104,17 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 				mPolyLines.back().setClosed();
 			break;
 		case KeyEvent::KEY_TAB:
-			selectNextFace();
+			if( ! ( event.isAltDown() || event.isMetaDown() ) )
+				selectNextFace();
+			break;
+		case KeyEvent::KEY_BACKSPACE:
+			if( hasSelectedFace() ) {
+				mPolyLines.erase( mFaceSelected );
+				deselectFace();
+			}
 			break;
 		case KeyEvent::KEY_n:
-			if( this->isAppending() )
+			if( isAppending() )
 				mPolyLines.back().setClosed();
 			mPolyLines.push_back( PolyLine2f() );
 			break;
