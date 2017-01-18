@@ -17,43 +17,65 @@ class PolylineEditorApp : public App {
 	void resize() override;
 	void update() override;
 	void draw() override;
+	void drawAddCursor( const vec2 &at );
+	void drawRemoveCursor( const vec2 &at );
+	void drawMoveCursor( const vec2 &at );
 
 	// Using a list so the iterators are valid after insertions and removals.
-	typedef typename list<PolyLine2f>::iterator Iterator;
+	typedef typename list<PolyLine2f>::iterator FaceIterator;
+	typedef typename vector<vec2>::iterator		VertexIterator;
 	typedef typename std::pair<vec2, vec2>		Edge;
 
+	bool hasHoverFace() const { return mFaceHover != mPolyLines.end(); }
+	void setHoverFace( const FaceIterator &face ) { mFaceHover = face; }
+	void clearHoverFace() { mFaceHover = mPolyLines.end(); }
+
 	bool hasSelectedFace() const { return mFaceSelected != mPolyLines.end(); };
-	void selectFace( Iterator &face ) { mFaceSelected = face; }
+	void selectFace( const FaceIterator &face ) {
+		mFaceSelected = face;
+		mVertHover = mFaceSelected->end();
+	}
 	void deselectFace() { mFaceSelected = mPolyLines.end(); };
-	void selectFirstFace() { mFaceSelected = mPolyLines.begin(); }
+	void selectFirstFace() { selectFace( mPolyLines.begin() ); }
 	void selectNextFace() {
 		++mFaceSelected;
-		if( ! hasSelectedFace() )
+		if( hasSelectedFace() )
+			mVertHover = mFaceSelected->end();
+		else
 			selectFirstFace();
 	}
 
 	// Applies the camera projection to determine where \a mouse lies on the
 	// plane. If this returns true then \a onPlane will be the result.
 	bool positionOnPlane( const vec2 &mouse, vec2 &onPlane ) const;
-	Iterator faceContainedBy( const vec2 &onPlane );
-	// Is the cursor over a vertex in the selected face (plus a \a margin)? If
-	// this returns true \a result will be the point.
-	bool isOverVertex( const vec2 &cursor, vec2 &result, float margin = 10 ) const;
-	// Is the cursor over an edge in the selected face (plus a \a margin)? If this
-	// returns true \a result will be the edge and \at will be the closest point
-	// to the cursor.
-	bool isOverEdge( const vec2 &cursor, Edge &result, vec2 &at, float margin = 10 ) const;
+	FaceIterator faceContainedBy( const vec2 &onPlane );
+	VertexIterator findVertexOnSelectedFace( const vec2 &cursor, const float margin ) const;
+	VertexIterator findSplitPoint( const vec2 &cursor, vec2 &target, const float margin ) const;
 
 	bool isAppending() const { return mPolyLines.size() && ! mPolyLines.back().isClosed(); }
 
+	enum OverWhat {
+		NADA,
+		FACE,
+		EDGE,
+		VERT,
+	};
+
+  private:
 	list<PolyLine2f>	mPolyLines;
-	Iterator	mFaceHover;		// The face the cursor is over
-	Iterator	mFaceSelected;	// The face they've selected
-	vec2		mVertexHover;	// Vertex in the selected face, only valid
+	u_int8_t		mHoverRadius = 20;
+	OverWhat		mHoverOver;		// What are they hovering over?
+	FaceIterator	mFaceHover;		// The face under the cursor
+	FaceIterator	mFaceSelected;	// The face they've selected
+	vec2			mInsertPoint;
+	VertexIterator	mInsertAfter;
+	VertexIterator	mVertHover;
     CameraPersp mEditCamera;
+
+	bool		mIsDragging;
 	vec2		mMousePosition;
 	vec2		mCursorPosition; // Is on the plane
-	ivec2		mLastMouseDrag;
+	vec2		mLastMouseDrag; //
 };
 
 void PolylineEditorApp::setup()
@@ -61,7 +83,12 @@ void PolylineEditorApp::setup()
     mEditCamera.setPerspective( 60.0f, getWindowAspectRatio(), 10.0f, 4000.0f );
     mEditCamera.lookAt( vec3( 0, 0, 1000 ), vec3( 0 ), vec3( 0, 1, 0 ) );
 
+	mHoverOver = NADA;
+	mIsDragging = false;
+
 	mPolyLines.push_back( PolyLine2f() );
+	clearHoverFace();
+	deselectFace();
 }
 
 void PolylineEditorApp::resize()
@@ -71,10 +98,30 @@ void PolylineEditorApp::resize()
 
 void PolylineEditorApp::mouseMove( MouseEvent event )
 {
+	mHoverOver = NADA;
+	mIsDragging = false;
 	mMousePosition = event.getPos();
 	positionOnPlane( mMousePosition, mCursorPosition );
-	if( ! isAppending() ) {
-		mFaceHover = this->faceContainedBy( mCursorPosition );
+
+	if( isAppending() )
+		return;
+
+	if ( hasSelectedFace() ) {
+		mVertHover = findVertexOnSelectedFace( mCursorPosition, mHoverRadius );
+		if ( mVertHover != mFaceSelected->end() ) {
+			mHoverOver = VERT;
+		}
+		else {
+			mInsertAfter = findSplitPoint( mCursorPosition, mInsertPoint, mHoverRadius );
+			if( mInsertAfter != mFaceSelected->end() ) {
+				mHoverOver = EDGE;
+			}
+		}
+	}
+
+	setHoverFace( this->faceContainedBy( mCursorPosition ) );
+	if( hasHoverFace() && mHoverOver == NADA ) {
+		mHoverOver = FACE;
 	}
 }
 
@@ -82,25 +129,32 @@ void PolylineEditorApp::mouseDown( MouseEvent event )
 {
 	if( this->isAppending() ) {
 		mPolyLines.back().push_back( mCursorPosition );
-	} else {
+	} else if ( mHoverOver == FACE ) {
 		selectFace( mFaceHover );
+	} else if ( mHoverOver == EDGE ) {
+		mFaceSelected->getPoints().insert( mInsertAfter, mInsertPoint );
+	} else {
+		deselectFace();
 	}
-
-	// Keel a recent value so when dragging starts the delta will be sane.
-	mLastMouseDrag = event.getPos();
 }
 
 void PolylineEditorApp::mouseDrag( MouseEvent event ) {
-	if( isAppending() ) return;
-
-	// Something isn't quite right here. It's dragging at half speed.
-	ivec2 delta( event.getPos() - mLastMouseDrag );
-	if( delta != ivec2( 0 ) && hasSelectedFace() ) {
-		mFaceSelected->offset( delta * ivec2( 1, -1 ) );
+	if( ! mIsDragging ) {
+		mLastMouseDrag = mCursorPosition;
+		mIsDragging = true;
 	}
-	mLastMouseDrag = event.getPos();
-}
+	positionOnPlane( event.getPos(), mCursorPosition );
 
+	if( mHoverOver == VERT ) {
+		*mVertHover = mCursorPosition;
+	} else if ( mHoverOver == FACE ) {
+		vec2 delta( mCursorPosition - mLastMouseDrag );
+		if( delta != vec2( 0 ) )
+			mFaceSelected->offset( delta );
+	}
+
+	mLastMouseDrag = mCursorPosition;
+}
 
 void PolylineEditorApp::keyUp( KeyEvent event )
 {
@@ -127,6 +181,7 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 			}
 			break;
 		case KeyEvent::KEY_n:
+			deselectFace();
 			if( isAppending() )
 				mPolyLines.back().setClosed();
 			mPolyLines.push_back( PolyLine2f() );
@@ -142,7 +197,6 @@ void PolylineEditorApp::draw()
 {
 	ColorA hover( 1, 0, 1, 1 );
 	ColorA selected( 0, 1, 1, 1 );
-	u_int8_t circleRadius( 20 );
 	u_int8_t circleSegments( 8 );
 
 	gl::clear( Color( 0, 0, 0 ) );
@@ -165,17 +219,17 @@ void PolylineEditorApp::draw()
 			gl::ScopedColor color( selected );
 			gl::draw( *p );
 
-			vec2 vert;
-			Edge edge;
-			if( isOverVertex( mCursorPosition, vert, circleRadius ) ) {
-				gl::ScopedColor color( Color( 1, 1, 0 ) );
-				gl::drawSolidCircle( vert, circleRadius, circleSegments );
-			} else if( isOverEdge( mCursorPosition, edge, vert, circleRadius ) ) {
-				gl::ScopedColor color( Color( 1, 1, 0 ) );
-				gl::drawLine( edge.first, edge.second );
-				gl::drawSolidCircle( vert, circleRadius, circleSegments );
+			gl::color( Color::white() );
+			for( auto const &vert : p->getPoints() ) {
+				gl::drawSolidCircle( vert, mHoverRadius / 2, circleSegments );
 			}
-		} else if( mFaceHover == p ) {
+
+			if( mHoverOver == VERT ) {
+				drawMoveCursor( *mVertHover );
+			} else if( mHoverOver == EDGE ) {
+				drawAddCursor( mInsertPoint );
+			}
+		} else if( mHoverOver == FACE && mFaceHover == p ) {
 			gl::ScopedColor color( hover );
 			gl::draw( *p );
 		}
@@ -184,16 +238,46 @@ void PolylineEditorApp::draw()
 	if( isAppending ) {
 		// Draw the incomplete shape
 		PolyLine2f copy( mPolyLines.back() );
+		// TODO: would be cool if these last two lines could be dashed.
 		copy.push_back( mCursorPosition );
 		copy.setClosed();
 		gl::draw( copy );
 
 		// Draw the + cursor
-		gl::ScopedModelMatrix scopedMatrix;
-		gl::translate( mCursorPosition );
-		gl::drawSolidRect( Rectf( vec2( -5, 20 ), vec2( 5, -20 ) ) );
-		gl::drawSolidRect( Rectf( vec2( -20, 5 ), vec2( 20, -5 ) ) );
+		drawAddCursor( mCursorPosition );
 	}
+}
+
+void PolylineEditorApp::drawAddCursor( const vec2 &at )
+{
+	gl::ScopedModelMatrix scopedMatrix;
+	gl::translate( at );
+	gl::drawSolidRect( Rectf( vec2( -5, 20 ), vec2( 5, -20 ) ) );
+	gl::drawSolidRect( Rectf( vec2( -20, 5 ), vec2( 20, -5 ) ) );
+}
+
+void PolylineEditorApp::drawRemoveCursor( const vec2 &at )
+{
+	gl::ScopedModelMatrix scopedMatrix;
+	gl::translate( at );
+	gl::rotate( M_PI_4 );
+	gl::drawSolidRect( Rectf( vec2( -5, 20 ), vec2( 5, -20 ) ) );
+	gl::drawSolidRect( Rectf( vec2( -20, 5 ), vec2( 20, -5 ) ) );
+}
+
+void PolylineEditorApp::drawMoveCursor( const vec2 &at )
+{
+	gl::ScopedModelMatrix scopedMatrix;
+	gl::translate( at );
+
+	// TODO: should avoid this second scaling and just size the
+	// triangles to match everything else.
+	gl::scale( vec2( 5 ) );
+
+	gl::drawSolidTriangle( vec2( 0,  5 ), vec2( -2,  3 ), vec2(  2,  3 ) );
+	gl::drawSolidTriangle( vec2( 0, -5 ), vec2(  2, -3 ), vec2( -2, -3 ) );
+	gl::drawSolidTriangle( vec2(  5, 0 ), vec2(  3, -2 ), vec2(  3,  2 ) );
+	gl::drawSolidTriangle( vec2( -5, 0 ), vec2( -3,  2 ), vec2( -3, -2 ) );
 }
 
 bool PolylineEditorApp::positionOnPlane( const vec2 &mouse, vec2 &onPlane ) const
@@ -210,39 +294,32 @@ bool PolylineEditorApp::positionOnPlane( const vec2 &mouse, vec2 &onPlane ) cons
     return true;
 }
 
-
-PolylineEditorApp::Iterator PolylineEditorApp::faceContainedBy( const vec2 &onPlane )
+PolylineEditorApp::FaceIterator PolylineEditorApp::faceContainedBy( const vec2 &onPlane )
 {
 	return std::find_if( mPolyLines.begin(), mPolyLines.end(),
 		[&onPlane]( const PolyLine2f &p ) { return p.contains( onPlane ); } );
 }
 
-bool PolylineEditorApp::isOverVertex( const vec2 &cursor, vec2 &result, float margin ) const
+PolylineEditorApp::VertexIterator PolylineEditorApp::findVertexOnSelectedFace( const vec2 &cursor, const float margin ) const
 {
 	std::vector<vec2> &points = mFaceSelected->getPoints();
 	float margin2 = margin * margin;
-	for( auto const &p : points ) {
-		if( glm::distance2( p, cursor ) < margin2 ) {
-			result = p;
-			return true;
-		}
-	}
-	return false;
+	return std::find_if( points.begin(), points.end(), [&]( const vec2 &p ) {
+		return glm::distance2( p, cursor ) < margin2;
+	});
 }
 
-bool PolylineEditorApp::isOverEdge( const vec2 &cursor, Edge &result, vec2 &at, float margin ) const
+PolylineEditorApp::VertexIterator PolylineEditorApp::findSplitPoint( const vec2 &cursor, vec2 &target, const float margin ) const
 {
 	std::vector<vec2> &points = mFaceSelected->getPoints();
 	float margin2 = margin * margin;
 
-	if( points.size() < 2 ) return false;
+	if( points.size() < 2 ) return points.end();
 
 	auto distanceCheck = [&]( const vec2 &a, const vec2 & b ) {
 		vec2 closest = getClosestPointLinear( a, b, cursor );
 		if( glm::distance2( closest, cursor ) < margin2 ) {
-			result.first = a;
-			result.second = b;
-			at = closest;
+			target = closest;
 			return true;
 		}
 		return false;
@@ -250,15 +327,15 @@ bool PolylineEditorApp::isOverEdge( const vec2 &cursor, Edge &result, vec2 &at, 
 
 	for( auto prev = points.begin(), curr = prev + 1; curr != points.end(); ++curr ) {
 		if( distanceCheck( *prev, *curr ) )
-			return true;
+			return curr;
 		prev = curr;
 	}
 	if( mFaceSelected->isClosed() && points.front() != points.back() ) {
-		if( distanceCheck( points.front(), points.back() ) )
-			return true;
+		if( distanceCheck( points.back(), points.front() ) )
+			return points.begin();
 	}
 
-	return false;
+	return points.end();
 }
 
 void prepareSettings( App::Settings *settings )
