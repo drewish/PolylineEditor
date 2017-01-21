@@ -13,6 +13,7 @@ class PolylineEditorApp : public App {
 	void mouseMove( MouseEvent event ) override;
 	void mouseDown( MouseEvent event ) override;
 	void mouseDrag( MouseEvent event ) override;
+	void mouseUp( MouseEvent event ) override;
 	void keyUp( KeyEvent event ) override;
 	void resize() override;
 	void update() override;
@@ -48,9 +49,14 @@ class PolylineEditorApp : public App {
 	// Applies the camera projection to determine where \a mouse lies on the
 	// plane. If this returns true then \a onPlane will be the result.
 	bool positionOnPlane( const vec2 &mouse, vec2 &onPlane ) const;
-	FaceIterator faceContainedBy( const vec2 &onPlane );
-	VertexIterator findVertexOnSelectedFace( const vec2 &cursor, const float margin ) const;
-	VertexIterator findSplitPoint( const vec2 &cursor, vec2 &target, const float margin ) const;
+	// Find the face that is contained by the cursor.
+	FaceIterator faceContainedBy( const vec2 &cursor, std::list<PolyLine2f> &polylines );
+	// Looks for a point with in \a distance of \a cursor. Returns iterator in \a points.
+	VertexIterator findVertexNear( const vec2 &cursor, std::vector<vec2> &points, float distance ) const;
+	// Looks for where you would insert a point to split an edge in \points. The
+	// cursor must be within distance of the edge. \a target is the point on the edge.
+	// Returns iterator in \a points where insertion should occur.
+	VertexIterator findSplitPoint( const vec2 &cursor, std::vector<vec2> &points, float distance, vec2 &target ) const;
 
 	bool isAppending() const { return mPolyLines.size() && ! mPolyLines.back().isClosed(); }
 
@@ -103,23 +109,24 @@ void PolylineEditorApp::mouseMove( MouseEvent event )
 	mMousePosition = event.getPos();
 	positionOnPlane( mMousePosition, mCursorPosition );
 
-	if( isAppending() )
+	if( isAppending() ) {
 		return;
+	}
 
-	if ( hasSelectedFace() ) {
-		mVertHover = findVertexOnSelectedFace( mCursorPosition, mHoverRadius );
-		if ( mVertHover != mFaceSelected->end() ) {
+	if( hasSelectedFace() ) {
+		mVertHover = findVertexNear( mCursorPosition, mFaceSelected->getPoints(), mHoverRadius );
+		if( mVertHover != mFaceSelected->end() ) {
 			mHoverOver = VERT;
 		}
 		else {
-			mInsertAfter = findSplitPoint( mCursorPosition, mInsertPoint, mHoverRadius );
+			mInsertAfter = findSplitPoint( mCursorPosition, mFaceSelected->getPoints(), mHoverRadius, mInsertPoint );
 			if( mInsertAfter != mFaceSelected->end() ) {
 				mHoverOver = EDGE;
 			}
 		}
 	}
 
-	setHoverFace( this->faceContainedBy( mCursorPosition ) );
+	setHoverFace( faceContainedBy( mCursorPosition, mPolyLines ) );
 	if( hasHoverFace() && mHoverOver == NADA ) {
 		mHoverOver = FACE;
 	}
@@ -127,33 +134,43 @@ void PolylineEditorApp::mouseMove( MouseEvent event )
 
 void PolylineEditorApp::mouseDown( MouseEvent event )
 {
-	if( this->isAppending() ) {
-		mPolyLines.back().push_back( mCursorPosition );
-	} else if ( mHoverOver == FACE ) {
+	// Process the select face on down so we can click and drag in one step
+	if( mHoverOver == FACE ) {
 		selectFace( mFaceHover );
-	} else if ( mHoverOver == EDGE ) {
-		mFaceSelected->getPoints().insert( mInsertAfter, mInsertPoint );
-	} else {
-		deselectFace();
 	}
 }
 
-void PolylineEditorApp::mouseDrag( MouseEvent event ) {
+void PolylineEditorApp::mouseDrag( MouseEvent event )
+{
 	if( ! mIsDragging ) {
 		mLastMouseDrag = mCursorPosition;
-		mIsDragging = true;
 	}
+	mIsDragging = true;
+
 	positionOnPlane( event.getPos(), mCursorPosition );
 
 	if( mHoverOver == VERT ) {
 		*mVertHover = mCursorPosition;
-	} else if ( mHoverOver == FACE ) {
+	} else if( mHoverOver == FACE ) {
 		vec2 delta( mCursorPosition - mLastMouseDrag );
 		if( delta != vec2( 0 ) )
 			mFaceSelected->offset( delta );
 	}
 
 	mLastMouseDrag = mCursorPosition;
+}
+
+void PolylineEditorApp::mouseUp( MouseEvent event )
+{
+	if( mIsDragging ) {
+		mIsDragging = false;
+	} else if( this->isAppending() ) {
+		mPolyLines.back().push_back( mCursorPosition );
+	} else if( mHoverOver == EDGE ) {
+		mFaceSelected->getPoints().insert( mInsertAfter, mInsertPoint );
+	} else if( mHoverOver != FACE ) {
+		deselectFace();
+	}
 }
 
 void PolylineEditorApp::keyUp( KeyEvent event )
@@ -294,31 +311,29 @@ bool PolylineEditorApp::positionOnPlane( const vec2 &mouse, vec2 &onPlane ) cons
     return true;
 }
 
-PolylineEditorApp::FaceIterator PolylineEditorApp::faceContainedBy( const vec2 &onPlane )
+PolylineEditorApp::FaceIterator PolylineEditorApp::faceContainedBy( const vec2 &needle, std::list<PolyLine2f> &haystack )
 {
-	return std::find_if( mPolyLines.begin(), mPolyLines.end(),
-		[&onPlane]( const PolyLine2f &p ) { return p.contains( onPlane ); } );
+	return std::find_if( haystack.begin(), haystack.end(),
+		[&]( const PolyLine2f &p ) { return p.contains( needle ); } );
 }
 
-PolylineEditorApp::VertexIterator PolylineEditorApp::findVertexOnSelectedFace( const vec2 &cursor, const float margin ) const
+PolylineEditorApp::VertexIterator PolylineEditorApp::findVertexNear( const vec2 &needle, std::vector<vec2> &haystack, float distance ) const
 {
-	std::vector<vec2> &points = mFaceSelected->getPoints();
-	float margin2 = margin * margin;
-	return std::find_if( points.begin(), points.end(), [&]( const vec2 &p ) {
-		return glm::distance2( p, cursor ) < margin2;
+	float distance2 = distance * distance;
+	return std::find_if( haystack.begin(), haystack.end(), [&]( const vec2 &p ) {
+		return glm::distance2( p, needle ) < distance2;
 	});
 }
 
-PolylineEditorApp::VertexIterator PolylineEditorApp::findSplitPoint( const vec2 &cursor, vec2 &target, const float margin ) const
+PolylineEditorApp::VertexIterator PolylineEditorApp::findSplitPoint( const vec2 &cursor, std::vector<vec2> &points, float distance, vec2 &target ) const
 {
-	std::vector<vec2> &points = mFaceSelected->getPoints();
-	float margin2 = margin * margin;
+	float distance2 = distance * distance;
 
 	if( points.size() < 2 ) return points.end();
 
 	auto distanceCheck = [&]( const vec2 &a, const vec2 & b ) {
 		vec2 closest = getClosestPointLinear( a, b, cursor );
-		if( glm::distance2( closest, cursor ) < margin2 ) {
+		if( glm::distance2( closest, cursor ) < distance2 ) {
 			target = closest;
 			return true;
 		}
