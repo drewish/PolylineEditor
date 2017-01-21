@@ -79,9 +79,9 @@ class PolylineEditorApp : public App {
     CameraPersp mEditCamera;
 
 	bool		mIsDragging;
-	vec2		mMousePosition;
-	vec2		mCursorPosition; // Is on the plane
-	vec2		mLastMouseDrag; //
+	// Positions are corrdinates on the plane
+	vec2		mCursorPosition;
+	vec2		mLastCursorPosition;
 };
 
 void PolylineEditorApp::setup()
@@ -104,10 +104,10 @@ void PolylineEditorApp::resize()
 
 void PolylineEditorApp::mouseMove( MouseEvent event )
 {
-	mHoverOver = NADA;
 	mIsDragging = false;
-	mMousePosition = event.getPos();
-	positionOnPlane( mMousePosition, mCursorPosition );
+	mLastCursorPosition = mCursorPosition;
+	positionOnPlane( event.getPos(), mCursorPosition );
+	mHoverOver = NADA;
 
 	if( isAppending() ) {
 		return;
@@ -142,22 +142,19 @@ void PolylineEditorApp::mouseDown( MouseEvent event )
 
 void PolylineEditorApp::mouseDrag( MouseEvent event )
 {
-	if( ! mIsDragging ) {
-		mLastMouseDrag = mCursorPosition;
-	}
 	mIsDragging = true;
-
+	mLastCursorPosition = mCursorPosition;
 	positionOnPlane( event.getPos(), mCursorPosition );
 
 	if( mHoverOver == VERT ) {
+		// Move vertex
 		*mVertHover = mCursorPosition;
 	} else if( mHoverOver == FACE ) {
-		vec2 delta( mCursorPosition - mLastMouseDrag );
+		// Move face
+		vec2 delta( mCursorPosition - mLastCursorPosition );
 		if( delta != vec2( 0 ) )
 			mFaceSelected->offset( delta );
 	}
-
-	mLastMouseDrag = mCursorPosition;
 }
 
 void PolylineEditorApp::mouseUp( MouseEvent event )
