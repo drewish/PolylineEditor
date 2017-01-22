@@ -46,6 +46,11 @@ class PolylineEditorApp : public App {
 			selectFirstFace();
 	}
 
+	vec2 snapToGrid( const vec2 &cursor, const vec2 &grid ) const
+	{
+		return grid * glm::round( cursor / grid );
+	}
+
 	// Applies the camera projection to determine where \a mouse lies on the
 	// plane. If this returns true then \a onPlane will be the result.
 	bool positionOnPlane( const vec2 &mouse, vec2 &onPlane ) const;
@@ -78,6 +83,8 @@ class PolylineEditorApp : public App {
 	VertexIterator	mVertHover;
     CameraPersp mEditCamera;
 
+	bool		mIsSnapping = true;
+	vec2		mGridSize = vec2( 25 );
 	bool		mIsDragging;
 	// Positions are corrdinates on the plane
 	vec2		mCursorPosition;
@@ -200,6 +207,9 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 				mPolyLines.back().setClosed();
 			mPolyLines.push_back( PolyLine2f() );
 			break;
+		case KeyEvent::KEY_g:
+			mIsSnapping = ! mIsSnapping;
+			break;
 	}
 }
 
@@ -304,7 +314,8 @@ bool PolylineEditorApp::positionOnPlane( const vec2 &mouse, vec2 &onPlane ) cons
         return false;
     }
     vec3 intersection = ray.calcPosition( distance );
-    onPlane = vec2( intersection.x, intersection.y );
+	vec2 point( intersection.x, intersection.y );
+	onPlane = mIsSnapping ? snapToGrid( point, mGridSize ) : point;
     return true;
 }
 
