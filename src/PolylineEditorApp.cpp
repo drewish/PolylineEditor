@@ -1,3 +1,21 @@
+/*
+(select vert ahead of edge since they're smaller and harder to select)
+
+verbs to support
+- new (new face, append vertex)
+- move (move entire face, move vertex, move both vertexes in edge?)
+- remove (remove entire face, remove vertex)
+- split (edge)
+
+rework selection mode
+- active face (changing clears vert and edge)
+- active vert (allows: move, delete)
+- active edge (allows: move, split, delete)
+
+- hover face (select from all faces)
+- hover vert (limited to active face)
+- hover edge (limited to active face)
+*/
 #include "cinder/app/App.h"
 #include "cinder/app/RendererGl.h"
 #include "cinder/gl/gl.h"
@@ -6,6 +24,88 @@
 using namespace ci;
 using namespace ci::app;
 using namespace std;
+
+struct Focus {
+	int face = -1;
+	int vert = -1; //
+	int edge = -1; // target side of source -> target
+
+	int setFace( int f ) {
+		clearVertEdge();
+		return face = f;
+	}
+	int setVert( int v ) {
+		edge = -1;
+		return vert = v;
+	}
+	int setEdge( int e ) {
+		vert = -1;
+		return edge = e;
+	}
+	void clear() { face = vert = edge = -1; }
+	void clearVertEdge() { vert = edge = -1; }
+	bool hasFace() const { return face != -1; }
+	bool hasVert() const { return hasFace() && vert != -1; }
+	bool hasEdge() const { return hasFace() && edge != -1; }
+};
+
+int findFaceUnder( const vec2 &cursor, std::vector<PolyLine2f> &polylines )
+{
+	auto iterator = std::find_if( polylines.begin(), polylines.end(),
+		[&]( const PolyLine2f &p ) { return p.contains( cursor ); } );
+	if ( iterator == polylines.end() )
+		return -1;
+	return (int)std::distance( polylines.begin(), iterator );
+}
+
+int findVertexUnder( const vec2 &cursor, const PolyLine2 &polyline, float distance )
+{
+	float distance2 = distance * distance;
+	const vector<vec2> &points = polyline.getPoints();
+
+	auto iterator = std::find_if( points.begin(), points.end(), [&]( const vec2 &p ) {
+		return glm::distance2( p, cursor ) < distance2;
+	});
+	if ( iterator == polyline.end() )
+		return -1;
+	return (int)std::distance( points.begin(), iterator );
+}
+
+int findEdgeUnder( const vec2 &cursor, const PolyLine2 &polyline, float distance, vec2 &closestPointOnEdge )
+{
+	float distance2 = distance * distance;
+	const vector<vec2> &points = polyline.getPoints();
+
+	if( points.size() < 2 ) return -1;
+
+	auto distanceCheck = [&]( const vec2 &a, const vec2 & b ) {
+		vec2 closest = getClosestPointLinear( a, b, cursor );
+		if( glm::distance2( closest, cursor ) < distance2 ) {
+			closestPointOnEdge = closest;
+			return true;
+		}
+		return false;
+	};
+
+	for( auto prev = points.begin(), curr = prev + 1; curr != points.end(); ++curr ) {
+		if( distanceCheck( *prev, *curr ) )
+			return (int)std::distance( points.begin(), curr);
+		prev = curr;
+	}
+	if( polyline.isClosed() && points.front() != points.back() ) {
+		if( distanceCheck( points.back(), points.front() ) )
+			return 0;
+	}
+
+	return -1;
+}
+
+void snapToGrid( vec2 &cursor, const vec2 &grid, bool doSnap = true )
+{
+	if( doSnap )
+		cursor = grid * glm::round( cursor / grid );
+}
+
 
 class PolylineEditorApp : public App {
   public:
@@ -22,65 +122,40 @@ class PolylineEditorApp : public App {
 	void drawRemoveCursor( const vec2 &at );
 	void drawMoveCursor( const vec2 &at );
 
-	// Using a list so the iterators are valid after insertions and removals.
-	typedef typename list<PolyLine2f>::iterator FaceIterator;
-	typedef typename vector<vec2>::iterator		VertexIterator;
-	typedef typename std::pair<vec2, vec2>		Edge;
-
-	bool hasHoverFace() const { return mFaceHover != mPolyLines.end(); }
-	void setHoverFace( const FaceIterator &face ) { mFaceHover = face; }
-	void clearHoverFace() { mFaceHover = mPolyLines.end(); }
-
-	bool hasSelectedFace() const { return mFaceSelected != mPolyLines.end(); };
-	void selectFace( const FaceIterator &face ) {
-		mFaceSelected = face;
-		mVertHover = mFaceSelected->end();
+	typedef std::pair<vec2&, vec2&> Edge;
+	void setHoverFace( int face ) {
+		mHover.setFace( face < mPolyLines.size() ? face : -1 );
 	}
-	void deselectFace() { mFaceSelected = mPolyLines.end(); };
-	void selectFirstFace() { selectFace( mPolyLines.begin() ); }
+	PolyLine2& getHoverFace() { return mPolyLines[mHover.face]; }
+	vec2& getHoverVertex() { return mPolyLines[mHover.face].getPoints().at(mHover.vert); }
+
+	void setActiveFace( int face ) {
+		mActive.setFace( face < mPolyLines.size() ? face : -1 );
+	}
 	void selectNextFace() {
-		++mFaceSelected;
-		if( hasSelectedFace() )
-			mVertHover = mFaceSelected->end();
-		else
-			selectFirstFace();
+		setActiveFace( mActive.face + 1 < mPolyLines.size() ? mActive.face + 1 : 0 );
 	}
-
-	vec2 snapToGrid( const vec2 &cursor, const vec2 &grid ) const
-	{
-		return grid * glm::round( cursor / grid );
+	PolyLine2& getActiveFace() { return mPolyLines.at(mActive.face); }
+	vec2& getActiveVertex() { return getActiveFace().getPoints().at(mActive.vert); }
+	Edge getActiveEdge() {
+		vector<vec2> &points = getActiveFace().getPoints();
+		int target = mActive.edge;
+		int source = ( target == 0 ? (int)points.size() : target ) - 1;
+		return Edge( points[source], points[target] );
 	}
 
 	// Applies the camera projection to determine where \a mouse lies on the
 	// plane. If this returns true then \a onPlane will be the result.
 	bool positionOnPlane( const vec2 &mouse, vec2 &onPlane ) const;
-	// Find the face that is contained by the cursor.
-	FaceIterator faceContainedBy( const vec2 &cursor, std::list<PolyLine2f> &polylines );
-	// Looks for a point with in \a distance of \a cursor. Returns iterator in \a points.
-	VertexIterator findVertexNear( const vec2 &cursor, std::vector<vec2> &points, float distance ) const;
-	// Looks for where you would insert a point to split an edge in \points. The
-	// cursor must be within distance of the edge. \a target is the point on the edge.
-	// Returns iterator in \a points where insertion should occur.
-	VertexIterator findSplitPoint( const vec2 &cursor, std::vector<vec2> &points, float distance, vec2 &target ) const;
 
 	bool isAppending() const { return mPolyLines.size() && ! mPolyLines.back().isClosed(); }
 
-	enum OverWhat {
-		NADA,
-		FACE,
-		EDGE,
-		VERT,
-	};
-
   private:
-	list<PolyLine2f>	mPolyLines;
+	vector<PolyLine2f>	mPolyLines;
 	u_int8_t		mHoverRadius = 20;
-	OverWhat		mHoverOver;		// What are they hovering over?
-	FaceIterator	mFaceHover;		// The face under the cursor
-	FaceIterator	mFaceSelected;	// The face they've selected
 	vec2			mInsertPoint;
-	VertexIterator	mInsertAfter;
-	VertexIterator	mVertHover;
+	Focus			mActive;
+	Focus			mHover;
     CameraPersp mEditCamera;
 
 	bool		mIsSnapping = true;
@@ -96,12 +171,11 @@ void PolylineEditorApp::setup()
     mEditCamera.setPerspective( 60.0f, getWindowAspectRatio(), 10.0f, 4000.0f );
     mEditCamera.lookAt( vec3( 0, 0, 1000 ), vec3( 0 ), vec3( 0, 1, 0 ) );
 
-	mHoverOver = NADA;
 	mIsDragging = false;
 
 	mPolyLines.push_back( PolyLine2f() );
-	clearHoverFace();
-	deselectFace();
+	mActive.clear();
+	mHover.clear();
 }
 
 void PolylineEditorApp::resize()
@@ -114,36 +188,40 @@ void PolylineEditorApp::mouseMove( MouseEvent event )
 	mIsDragging = false;
 	mLastCursorPosition = mCursorPosition;
 	positionOnPlane( event.getPos(), mCursorPosition );
-	mHoverOver = NADA;
+	snapToGrid( mCursorPosition, mGridSize, mIsSnapping );
 
 	if( isAppending() ) {
 		return;
 	}
 
-	if( hasSelectedFace() ) {
-		mVertHover = findVertexNear( mCursorPosition, mFaceSelected->getPoints(), mHoverRadius );
-		if( mVertHover != mFaceSelected->end() ) {
-			mHoverOver = VERT;
-		}
-		else {
-			mInsertAfter = findSplitPoint( mCursorPosition, mFaceSelected->getPoints(), mHoverRadius, mInsertPoint );
-			if( mInsertAfter != mFaceSelected->end() ) {
-				mHoverOver = EDGE;
+	setHoverFace( findFaceUnder( mCursorPosition, mPolyLines ) );
+	if( mActive.hasFace() ) {
+		int vert = findVertexUnder( mCursorPosition, getActiveFace(), mHoverRadius );
+		if( vert != -1 ) {
+			mHover.setFace( mActive.face );
+			mHover.setVert( vert );
+		} else {
+			int edge = findEdgeUnder( mCursorPosition, getActiveFace(), mHoverRadius, mInsertPoint );
+			if( edge != -1 ) {
+				mHover.setFace( mActive.face );
+				mHover.setEdge( edge );
+				snapToGrid( mInsertPoint, mGridSize, mIsSnapping );
 			}
 		}
-	}
-
-	setHoverFace( faceContainedBy( mCursorPosition, mPolyLines ) );
-	if( hasHoverFace() && mHoverOver == NADA ) {
-		mHoverOver = FACE;
 	}
 }
 
 void PolylineEditorApp::mouseDown( MouseEvent event )
 {
 	// Process the select face on down so we can click and drag in one step
-	if( mHoverOver == FACE ) {
-		selectFace( mFaceHover );
+	if( mHover.hasFace() ) {
+		if( mActive.face != mHover.face ) {
+			setActiveFace( mHover.face );
+		} else if( mHover.hasVert() && mActive.vert != mHover.vert ) {
+			mActive.setVert( mHover.vert );
+		} else if( mHover.hasEdge() && mActive.edge != mHover.edge ) {
+			mActive.setEdge( mHover.edge );
+		}
 	}
 }
 
@@ -152,15 +230,25 @@ void PolylineEditorApp::mouseDrag( MouseEvent event )
 	mIsDragging = true;
 	mLastCursorPosition = mCursorPosition;
 	positionOnPlane( event.getPos(), mCursorPosition );
+	snapToGrid( mCursorPosition, mGridSize, mIsSnapping );
 
-	if( mHoverOver == VERT ) {
-		// Move vertex
-		*mVertHover = mCursorPosition;
-	} else if( mHoverOver == FACE ) {
+	vec2 delta( mCursorPosition - mLastCursorPosition );
+	if( delta == vec2( 0 ) )
+		return;
+
+	if( mActive.hasVert() ) {
+		// Move vertex.
+		snapToGrid( getActiveVertex() += delta, mGridSize, mIsSnapping );
+	} else if( mActive.hasEdge() ) {
+		// Move both verticies in the edge.
+		Edge edge = getActiveEdge();
+		snapToGrid( edge.first += delta, mGridSize, mIsSnapping );
+		snapToGrid( edge.second += delta, mGridSize, mIsSnapping );
+		// Need to move this too so it doesn't reappear in the old spot.
+		mInsertPoint = mCursorPosition;
+	} else if( mActive.hasFace() ) {
 		// Move face
-		vec2 delta( mCursorPosition - mLastCursorPosition );
-		if( delta != vec2( 0 ) )
-			mFaceSelected->offset( delta );
+		getActiveFace().offset( delta );
 	}
 }
 
@@ -168,12 +256,17 @@ void PolylineEditorApp::mouseUp( MouseEvent event )
 {
 	if( mIsDragging ) {
 		mIsDragging = false;
+		mActive.clearVertEdge();
 	} else if( this->isAppending() ) {
 		mPolyLines.back().push_back( mCursorPosition );
-	} else if( mHoverOver == EDGE ) {
-		mFaceSelected->getPoints().insert( mInsertAfter, mInsertPoint );
-	} else if( mHoverOver != FACE ) {
-		deselectFace();
+	} else if( mHover.hasEdge() ) {
+		vector<vec2> &points = getActiveFace().getPoints();
+		points.insert( points.begin() + mActive.edge, mInsertPoint );
+		// Set the new vertex up to be moved immediately
+		mActive.setVert( mActive.edge );
+		mHover.setVert( mActive.edge );
+	} else if( ! mHover.hasFace() ) {
+		mActive.clear();
 	}
 }
 
@@ -184,11 +277,13 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 			if( isAppending() )
 				mPolyLines.pop_back();
 			else
-				deselectFace();
+				mActive.clear();
 			break;
 		case KeyEvent::KEY_RETURN:
-			if( mPolyLines.size() )
+			if( isAppending() ) {
 				mPolyLines.back().setClosed();
+				setActiveFace( (int)mPolyLines.size() - 1 );
+			}
 			break;
 		case KeyEvent::KEY_TAB:
 			// Ignore Alt+Tab or Command+Tab
@@ -196,13 +291,19 @@ void PolylineEditorApp::keyUp( KeyEvent event )
 				selectNextFace();
 			break;
 		case KeyEvent::KEY_BACKSPACE:
-			if( hasSelectedFace() ) {
-				mPolyLines.erase( mFaceSelected );
-				deselectFace();
+			if( mActive.hasVert() ) {
+				vector<vec2> &points = getActiveFace().getPoints();
+				points.erase( points.begin() + mActive.vert );
+				mActive.clearVertEdge();
+				mHover.clear();
+			} else if( mActive.hasFace() ) {
+				mPolyLines.erase( mPolyLines.begin() + mActive.face );
+				setActiveFace( mActive.face - 1 );
+				setHoverFace( mActive.face );
 			}
 			break;
 		case KeyEvent::KEY_n:
-			deselectFace();
+			mActive.clear();
 			if( isAppending() )
 				mPolyLines.back().setClosed();
 			mPolyLines.push_back( PolyLine2f() );
@@ -231,31 +332,41 @@ void PolylineEditorApp::draw()
 	if( mPolyLines.size() == 0 ) return;
 
 	bool isAppending = this->isAppending();
-	auto end = mPolyLines.end();
+	size_t faceEnd = mPolyLines.size();
 	if( isAppending )
-		--end;
+		--faceEnd;
 
 	// Draw completed shapes
-	for( auto p = mPolyLines.begin(); p != end; ++p ) {
+	for( size_t faceIndex = 0; faceIndex < faceEnd; ++faceIndex ) {
 		gl::ScopedColor color( ColorA( 1, 1, 1, 0.5 ) );
-		gl::drawSolid( *p );
-		if( mFaceSelected == p ) {
+		gl::drawSolid( mPolyLines[faceIndex] );
+		if( faceIndex == mActive.face ) {
 			gl::ScopedColor color( selected );
-			gl::draw( *p );
+			gl::draw( mPolyLines[faceIndex] );
 
 			gl::color( Color::white() );
-			for( auto const &vert : p->getPoints() ) {
-				gl::drawSolidCircle( vert, mHoverRadius / 2, circleSegments );
+			vector<vec2> &points = mPolyLines[faceIndex].getPoints();
+			for( size_t vertIndex = 0, size = points.size(); vertIndex < size; ++vertIndex ) {
+				gl::drawSolidCircle( points[vertIndex], mHoverRadius / 2, circleSegments );
+
+				if( ! mIsDragging && vertIndex == mActive.vert ) {
+					// Draw a second outline to indicate selection
+					gl::drawStrokedCircle( points[vertIndex], mHoverRadius, mHoverRadius / 2, circleSegments );
+				}
 			}
 
-			if( mHoverOver == VERT ) {
-				drawMoveCursor( *mVertHover );
-			} else if( mHoverOver == EDGE ) {
-				drawAddCursor( mInsertPoint );
+			if( mHover.hasVert() ) {
+				drawMoveCursor( getHoverVertex() );
+			} else if( mHover.hasEdge() ) {
+				if( mIsDragging ) {
+					drawMoveCursor( mCursorPosition );
+				} else {
+					drawAddCursor( mInsertPoint );
+				}
 			}
-		} else if( mHoverOver == FACE && mFaceHover == p ) {
+		} else if( faceIndex == mHover.face ) {
 			gl::ScopedColor color( hover );
-			gl::draw( *p );
+			gl::draw( mPolyLines[faceIndex] );
 		}
 	}
 
@@ -296,7 +407,7 @@ void PolylineEditorApp::drawMoveCursor( const vec2 &at )
 
 	// TODO: should avoid this second scaling and just size the
 	// triangles to match everything else.
-	gl::scale( vec2( 5 ) );
+	gl::scale( vec2( 6 ) );
 
 	gl::drawSolidTriangle( vec2( 0,  5 ), vec2( -2,  3 ), vec2(  2,  3 ) );
 	gl::drawSolidTriangle( vec2( 0, -5 ), vec2(  2, -3 ), vec2( -2, -3 ) );
@@ -314,55 +425,14 @@ bool PolylineEditorApp::positionOnPlane( const vec2 &mouse, vec2 &onPlane ) cons
         return false;
     }
     vec3 intersection = ray.calcPosition( distance );
-	vec2 point( intersection.x, intersection.y );
-	onPlane = mIsSnapping ? snapToGrid( point, mGridSize ) : point;
+	onPlane = vec2( intersection.x, intersection.y );
+//	vec2 point( intersection.x, intersection.y );
+//	onPlane = mIsSnapping ? snapToGrid( point, mGridSize ) : point;
     return true;
-}
-
-PolylineEditorApp::FaceIterator PolylineEditorApp::faceContainedBy( const vec2 &needle, std::list<PolyLine2f> &haystack )
-{
-	return std::find_if( haystack.begin(), haystack.end(),
-		[&]( const PolyLine2f &p ) { return p.contains( needle ); } );
-}
-
-PolylineEditorApp::VertexIterator PolylineEditorApp::findVertexNear( const vec2 &needle, std::vector<vec2> &haystack, float distance ) const
-{
-	float distance2 = distance * distance;
-	return std::find_if( haystack.begin(), haystack.end(), [&]( const vec2 &p ) {
-		return glm::distance2( p, needle ) < distance2;
-	});
-}
-
-PolylineEditorApp::VertexIterator PolylineEditorApp::findSplitPoint( const vec2 &cursor, std::vector<vec2> &points, float distance, vec2 &target ) const
-{
-	float distance2 = distance * distance;
-
-	if( points.size() < 2 ) return points.end();
-
-	auto distanceCheck = [&]( const vec2 &a, const vec2 & b ) {
-		vec2 closest = getClosestPointLinear( a, b, cursor );
-		if( glm::distance2( closest, cursor ) < distance2 ) {
-			target = closest;
-			return true;
-		}
-		return false;
-	};
-
-	for( auto prev = points.begin(), curr = prev + 1; curr != points.end(); ++curr ) {
-		if( distanceCheck( *prev, *curr ) )
-			return curr;
-		prev = curr;
-	}
-	if( mFaceSelected->isClosed() && points.front() != points.back() ) {
-		if( distanceCheck( points.back(), points.front() ) )
-			return points.begin();
-	}
-
-	return points.end();
 }
 
 void prepareSettings( App::Settings *settings )
 {
     settings->setHighDensityDisplayEnabled();
 }
-CINDER_APP( PolylineEditorApp, RendererGl, prepareSettings )
+CINDER_APP( PolylineEditorApp, RendererGl( RendererGl::Options().msaa( 4 ) ), prepareSettings )
